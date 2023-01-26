@@ -1,0 +1,2 @@
+python pythondirbuster.py
+pause
