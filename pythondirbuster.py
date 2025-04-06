@@ -1,13 +1,17 @@
 import requests
 from colored import fg
 
-# Cores
-roxo = fg('purple_3')
-verde = fg('green')
-vermelho = fg('red')
+# Colors
+purple = fg("purple_3")
+green = fg("green")
+red = fg("red")
+
 
 def show_banner():
-    print("\n" + roxo + r"""  
+    print(
+        "\n"
+        + purple
+        + r"""  
   _____       _   _                   _____  _      _               _   
  |  __ \     | | | |                 |  __ \(_)    | |             | |  
  | |__) |   _| |_| |__   ___  _ __   | |  | |_ _ __| |__  _   _ ___| |_ 
@@ -16,21 +20,27 @@ def show_banner():
  |_|    \__, |\__|_| |_|\___/|_| |_| |_____/|_|_|  |_.__/ \__,_|___/\__|
          __/ |                                                          
         |___/                                                           
-""")
-    print(roxo + "Coded by @nglshawty1 :)\n")
-    print(roxo + "Esse processo pode demorar um pouco dependendo do tamanho da wordlist...\n")
+"""
+    )
+    print(purple + "Coded by @nglshawty1 :)\n")
+    print(
+        purple
+        + "This process might take a while depending on the size of the wordlist...\n"
+    )
+
 
 def format_url(url):
     if not url.startswith("http://") and not url.startswith("https://"):
         return "https://" + url
     return url
 
+
 def run_dirbuster(target_url, wordlist_path="Subdomain.txt"):
     try:
-        with open(wordlist_path, 'r') as file:
+        with open(wordlist_path, "r") as file:
             lines = file.read().splitlines()
     except FileNotFoundError:
-        print(vermelho + f"Wordlist '{wordlist_path}' não encontrada.")
+        print(red + f"Wordlist '{wordlist_path}' not found.")
         return
 
     for word in lines:
@@ -38,19 +48,22 @@ def run_dirbuster(target_url, wordlist_path="Subdomain.txt"):
         try:
             response = requests.get(url)
             if 200 <= response.status_code <= 299:
-                print(verde + "########################")
-                print(verde + f"{url} // status code: {response.status_code}")
-                print(verde + "########################")
+                print(green + "########################")
+                print(green + f"{url} // status code: {response.status_code}")
+                print(green + "########################")
             else:
-                print(vermelho + f"Offline: {url} (status {response.status_code})")
+                print(red + f"Offline: {url} (status {response.status_code})")
         except requests.RequestException:
-            print(vermelho + f"Erro ao conectar: {url}")
+            print(red + f"Error connecting to: {url}")
+
 
 def main():
     show_banner()
-    target = input("Digite a URL alvo -> ").strip()
+    target = input("Enter the target URL -> ").strip()
     target = format_url(target)
     run_dirbuster(target)
 
+
 if __name__ == "__main__":
     main()
+    
