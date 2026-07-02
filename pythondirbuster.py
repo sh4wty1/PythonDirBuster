@@ -13,7 +13,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Iterator
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -91,6 +91,43 @@ def load_wordlist(path: str) -> list[str]:
             if word and not word.startswith("#"):
                 words.append(word)
     return words
+
+
+def resolve_base(base_url: str, timeout: float = DEFAULT_TIMEOUT) -> tuple[str, dict | None]:
+    """Follow redirects on the root so scanning an apex that 301s to www lands
+    on www (otherwise every path just comes back as a redirect to www).
+
+    Returns ``(scan_base, rebased)`` where ``rebased`` is ``{"from", "to"}`` when
+    the host changed, else ``None``. Uses headers only, so nothing is downloaded.
+    """
+    session = requests.Session()
+    session.headers.update({"User-Agent": USER_AGENT})
+    origin = urlparse(base_url)
+    url = base_url + "/"
+    seen: set[str] = set()
+    for _ in range(5):
+        try:
+            resp = session.get(url, timeout=timeout, allow_redirects=False, stream=True)
+        except requests.RequestException:
+            break
+        try:
+            status, location = resp.status_code, resp.headers.get("Location")
+        finally:
+            resp.close()
+        if not (300 <= status < 400 and location):
+            break
+        nxt = urljoin(url, location)
+        if nxt in seen:
+            break
+        seen.add(nxt)
+        url = nxt
+    final = urlparse(url)
+    if not final.hostname:
+        return base_url, None
+    scan_base = f"{final.scheme}://{final.netloc}"
+    if final.netloc.lower() != origin.netloc.lower():
+        return scan_base, {"from": origin.netloc, "to": final.netloc}
+    return base_url, None
 
 
 def probe(session: requests.Session, base_url: str, word: str, timeout: float) -> Result:
@@ -179,6 +216,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("-t", "--threads", type=int, default=DEFAULT_THREADS, help=f"concurrent requests (default: {DEFAULT_THREADS})")
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT, help=f"request timeout in seconds (default: {DEFAULT_TIMEOUT})")
     parser.add_argument("--no-color", action="store_true", help="disable colored output")
+    parser.add_argument("--no-follow", action="store_true", help="don't follow root redirects (scan the exact host, e.g. apex instead of www)")
     return parser.parse_args(argv)
 
 
@@ -203,6 +241,15 @@ def main(argv: list[str] | None = None) -> int:
     if not words:
         print(Color.paint(f"Wordlist '{args.wordlist}' is empty.", Color.RED))
         return 1
+
+    # Follow root redirects so scanning an apex that 301s to www hits www.
+    if not args.no_follow:
+        target, rebased = resolve_base(target, args.timeout)
+        if rebased:
+            print(Color.paint(
+                f"{rebased['from']} redirects to {rebased['to']}; scanning {rebased['to']}.",
+                Color.YELLOW,
+            ))
 
     found = run_dirbuster(target, words, args.threads, args.timeout)
 

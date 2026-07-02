@@ -45,6 +45,12 @@ python pythondirbuster.py example.com -w wordlist.txt -t 40 --timeout 3
 | `-t`, `--threads` | Number of concurrent requests | `20` |
 | `--timeout` | Request timeout in seconds | `5` |
 | `--no-color` | Disable colored output | off |
+| `--no-follow` | Don't follow root redirects (scan the exact host) | off |
+
+By default the scanner follows redirects on the root first, so pointing it at an
+apex that `301`s to `www` (e.g. `example.com` -> `www.example.com`) scans `www`
+instead of returning a wall of redirects. Pass `--no-follow` to scan the exact
+host you typed.
 
 On Windows you can also just double-click **`Run.bat`**.
 
