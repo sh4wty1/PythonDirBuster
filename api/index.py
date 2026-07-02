@@ -1,16 +1,16 @@
-"""Vercel serverless entry point for PythonDirBuster (safe demo mode).
+"""Vercel serverless entry point for PythonDirBuster.
 
 Unlike the local `webapp.py` (which streams via SSE and scans without limits),
-this version is built for a public serverless host, so it is deliberately
-constrained:
+this version runs on a serverless host, so the wordlist and thread count are
+capped to fit inside the function timeout (there is no long-lived streaming on
+serverless). Scanning is open to any domain.
 
-  * It only scans domains listed in the ALLOWED_DOMAINS env var (comma-separated).
-    With none set, scanning is disabled entirely. This stops your deployment from
-    being used to attack arbitrary third-party sites.
-  * The wordlist and thread count are capped so a scan finishes within the
-    function timeout (there is no long-lived streaming on serverless).
+  ⚠️ This deployment can probe any URL from Vercel's IPs. Anyone who can reach
+  it can use it to scan third-party sites (abuse / SSRF surface). Only expose it
+  if you're comfortable with that — e.g. put it behind auth, or set ALLOWED_DOMAINS
+  again to re-enable the allow-list (see the git history for that variant).
 
-Set on Vercel:  ALLOWED_DOMAINS = yourdomain.com,staging.yourdomain.com
+Tune the caps without a redeploy via the MAX_WORDS / MAX_THREADS env vars.
 """
 
 from __future__ import annotations
@@ -24,21 +24,12 @@ from flask import Flask, jsonify, request
 
 app = Flask(__name__)
 
-MAX_WORDS = 150          # keep the scan inside the function timeout
-MAX_THREADS = 50
+# Caps keep each scan inside the function timeout; override via env on Vercel.
+MAX_WORDS = int(os.environ.get("MAX_WORDS", "1000"))
+MAX_THREADS = int(os.environ.get("MAX_THREADS", "50"))
 REQUEST_TIMEOUT = 4.0
 USER_AGENT = "PythonDirBuster/2.0 (+https://github.com/)"
 WORDLIST_PATH = os.path.join(os.path.dirname(__file__), "..", "wordlist.txt")
-
-
-def allowed_domains() -> list[str]:
-    raw = os.environ.get("ALLOWED_DOMAINS", "")
-    return [d.strip().lower() for d in raw.split(",") if d.strip()]
-
-
-def host_is_allowed(host: str, allow: list[str]) -> bool:
-    host = host.lower()
-    return any(host == d or host.endswith("." + d) for d in allow)
 
 
 def normalize_url(url: str) -> str:
@@ -84,12 +75,8 @@ def scan_endpoint():
 
     target = normalize_url(raw_url)
     host = urlparse(target).hostname or ""
-
-    allow = allowed_domains()
-    if not allow:
-        return jsonify(error="Scanning is disabled. Set the ALLOWED_DOMAINS env var on the server."), 403
-    if not host_is_allowed(host, allow):
-        return jsonify(error=f"Domain '{host}' is not in this deployment's allow-list."), 403
+    if not host:
+        return jsonify(error="Could not parse a hostname from the target URL."), 400
 
     words = load_words()
     threads = min(MAX_THREADS, max(1, len(words)))
@@ -153,9 +140,9 @@ PAGE = """<!DOCTYPE html>
 <body>
 <div class="wrap">
   <h1><span class="s">&#9876;&#65039;</span> PythonDirBuster</h1>
-  <p class="sub">Demo mode &mdash; only allow-listed domains can be scanned.</p>
+  <p class="sub">Enter a target and scan for common paths. Only scan what you're authorized to test.</p>
   <form id="f">
-    <input id="url" placeholder="yourdomain.com" autocomplete="off" required>
+    <input id="url" placeholder="example.com" autocomplete="off" required>
     <button id="btn" type="submit">Scan</button>
   </form>
   <div class="status" id="status">Ready.</div>

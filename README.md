@@ -64,25 +64,27 @@ python webapp.py --port 8080 --host 0.0.0.0
 > serverless streaming limits (e.g. Vercel). Keep it bound to `127.0.0.1`, or if
 > you must host it, put it behind auth + a domain allow-list. See `webapp.py`.
 
-## ☁️ Deploy to Vercel (safe demo mode)
+## ☁️ Deploy to Vercel
 
-The repo ships a serverless entry point (`api/index.py` + `vercel.json`) built for
-public hosting. It is deliberately locked down: no long-running streaming, a capped
-wordlist, and — most importantly — it **only scans domains you explicitly allow**.
+The repo ships a serverless entry point (`api/index.py` + `vercel.json`) for public
+hosting. There's no live streaming on serverless, so each scan probes a capped slice
+of the (frequency-ordered) wordlist to stay inside the function timeout.
 
 1. Import the repo on [Vercel](https://vercel.com/new).
-2. In **Settings → Environment Variables**, add:
+2. Deploy. In **Settings → Domains**, add `dirbuster.fassi.dev` and create the
+   `CNAME dirbuster → cname.vercel-dns.com` record at your DNS provider for
+   `fassi.dev` (Vercel shows the exact value to use).
+3. *(Optional)* Tune the scan under **Settings → Environment Variables** — see
+   `.env.example`:
 
-   | Name | Value |
-   | --- | --- |
-   | `ALLOWED_DOMAINS` | `yourdomain.com,staging.yourdomain.com` |
+   | Name | Default | Description |
+   | --- | --- | --- |
+   | `MAX_WORDS` | `1000` | How many paths to probe per scan |
+   | `MAX_THREADS` | `50` | Max concurrent requests |
 
-   Without this variable, scanning stays **disabled** — the safe default.
-3. Deploy. Attach your custom domain in **Settings → Domains**.
-
-Only domains in `ALLOWED_DOMAINS` (and their subdomains) can be scanned, so nobody
-can point your deployment at third-party sites. For unrestricted local scanning,
-use `webapp.py` or the CLI instead.
+> ⚠️ **This deployment scans any domain.** Anyone who can reach it can use your
+> Vercel IPs to probe third-party sites. Keep it private, put it behind auth, or
+> re-introduce a domain allow-list if that's a concern.
 
 ## 💡 Notes
 
