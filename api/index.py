@@ -16,10 +16,12 @@ Tune the caps without a redeploy via the MAX_WORDS / MAX_THREADS env vars.
 from __future__ import annotations
 
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urljoin, urlparse
 
 import requests
+from requests.adapters import HTTPAdapter
 from flask import Flask, jsonify, request
 
 app = Flask(__name__)
@@ -36,6 +38,11 @@ REQUEST_TIMEOUT = 4.0
 # more, 10000 = those + 5000 more). Any request depth is clamped to MAX_WORDS.
 DEPTHS = (1000, 5000, 10000)
 DEFAULT_DEPTH = 5000
+
+# Wall-clock budget for a scan. Vercel kills the function at maxDuration (60s)
+# and returns a 504 with nothing, so we stop early and return partial results.
+# Slow / rate-limiting targets simply get as far as this allows.
+SCAN_BUDGET = float(os.environ.get("SCAN_BUDGET", "48"))
 USER_AGENT = "PythonDirBuster/2.0 (+https://github.com/)"
 WORDLIST_PATH = os.path.join(os.path.dirname(__file__), "..", "wordlist.txt")
 
@@ -59,23 +66,77 @@ def load_words() -> list[str]:
 
 def probe(session: requests.Session, base_url: str, word: str) -> dict | None:
     url = urljoin(base_url + "/", word)
+    # stream=True fetches only the headers; we never read the body. Sites with
+    # heavy 404 pages (tens of KB each) would otherwise make a deep scan download
+    # hundreds of MB and blow past the function timeout.
     try:
-        resp = session.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=False)
+        resp = session.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=False, stream=True)
     except requests.RequestException:
         return None
-    status = resp.status_code
-    if 200 <= status < 300:
-        category = "found"
-    elif 300 <= status < 400:
-        category = "redirect"
-    elif status in (401, 403):
-        category = "protected"
-    else:
-        return None  # not interesting
-    # For redirects, surface where they point so a wall of 301s becomes readable
-    # (most are trailing-slash / http->https / login redirects, not real hits).
-    location = resp.headers.get("Location") if category == "redirect" else None
+    try:
+        status = resp.status_code
+        if 200 <= status < 300:
+            category = "found"
+        elif 300 <= status < 400:
+            category = "redirect"
+        elif status in (401, 403):
+            category = "protected"
+        else:
+            return None  # not interesting
+        # For redirects, surface where they point so a wall of 301s becomes
+        # readable (trailing-slash / http->https / login redirects, not hits).
+        location = resp.headers.get("Location") if category == "redirect" else None
+    finally:
+        resp.close()
     return {"url": url, "status": status, "category": category, "location": location}
+
+
+def make_session() -> requests.Session:
+    session = requests.Session()
+    session.headers.update({"User-Agent": USER_AGENT})
+    # Size the connection pool to the thread count. Otherwise urllib3's default
+    # pool_maxsize=10 makes 100 threads churn through new TLS handshakes, which
+    # dominates the scan time.
+    adapter = HTTPAdapter(pool_connections=MAX_THREADS, pool_maxsize=MAX_THREADS)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
+
+
+def resolve_base(session: requests.Session, base_url: str):
+    """Follow redirects on the root and return (scan_base, rebased).
+
+    Follows up to a few hops using headers only (no body download), so a site
+    that 301s the apex to www gets scanned on www instead of returning a wall of
+    redirects. ``rebased`` is ``{"from": host, "to": host}`` when the host
+    changed, else ``None`` so the caller can tell the user.
+    """
+    origin = urlparse(base_url)
+    url = base_url + "/"
+    seen = set()
+    for _ in range(5):
+        try:
+            resp = session.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=False, stream=True)
+        except requests.RequestException:
+            break
+        try:
+            status, location = resp.status_code, resp.headers.get("Location")
+        finally:
+            resp.close()
+        if not (300 <= status < 400 and location):
+            break
+        nxt = urljoin(url, location)
+        if nxt in seen:
+            break
+        seen.add(nxt)
+        url = nxt
+    final = urlparse(url)
+    if not final.hostname:
+        return base_url, None
+    scan_base = f"{final.scheme}://{final.netloc}"
+    if final.netloc.lower() != origin.netloc.lower():
+        return scan_base, {"from": origin.netloc, "to": final.netloc}
+    return base_url, None
 
 
 @app.route("/api/scan")
@@ -97,19 +158,38 @@ def scan_endpoint():
         depth = DEFAULT_DEPTH
     words = load_words()[:depth]
     threads = min(MAX_THREADS, max(1, len(words)))
-    session = requests.Session()
-    session.headers.update({"User-Agent": USER_AGENT})
+    session = make_session()
+
+    # Follow redirects on the root first. Sites that 301 the apex to www (or
+    # http to https) would otherwise return a wall of 301s and hide the real
+    # pages behind them, so we scan wherever the root actually lands.
+    target, rebased = resolve_base(session, target)
 
     results: list[dict] = []
+    scanned = 0
+    partial = False
+    deadline = time.monotonic() + SCAN_BUDGET
     with ThreadPoolExecutor(max_workers=threads) as pool:
         futures = [pool.submit(probe, session, target, w) for w in words]
-        for fut in as_completed(futures):
-            hit = fut.result()
-            if hit:
-                results.append(hit)
+        try:
+            for fut in as_completed(futures):
+                hit = fut.result()
+                scanned += 1
+                if hit:
+                    results.append(hit)
+                if time.monotonic() >= deadline:
+                    partial = True
+                    break
+        finally:
+            # Cancel whatever hasn't started; the pool drains running probes
+            # (each bounded by REQUEST_TIMEOUT) as the `with` block exits.
+            for fu in futures:
+                fu.cancel()
 
     results.sort(key=lambda r: r["status"])
-    return jsonify(target=target, scanned=len(words), found=len(results), results=results)
+    return jsonify(target=target, rebased=rebased, scanned=scanned,
+                   total=len(words), partial=partial,
+                   found=len(results), results=results)
 
 
 @app.route("/")
@@ -265,6 +345,9 @@ PAGE = """<!DOCTYPE html>
   .u:hover{color:var(--accent)}
   .loc{font-family:var(--mono);font-size:.78rem;color:var(--text-mute);word-break:break-all}
   .empty{color:var(--text-mute);font-family:var(--mono);font-size:.85rem;padding:.5rem 0}
+  .note{font-family:var(--mono);font-size:.8rem;color:var(--accent-deep);margin:.25rem 0 .75rem;
+    background:var(--accent-soft);border:1px solid var(--accent-line);border-radius:var(--r);
+    padding:.55rem .75rem;word-break:break-all}
   /* skeleton loader (matches result-row shape) */
   .sk{height:41px;border:1px solid var(--line);border-radius:var(--r);
     background:linear-gradient(100deg,var(--surface) 30%,var(--surface-2) 50%,var(--surface) 70%);
@@ -346,6 +429,7 @@ PAGE = """<!DOCTYPE html>
     <div class="chips" id="chips"><span class="muted" id="status" data-i18n="ready"></span></div>
     <label class="toggle" id="reWrap" hidden><input type="checkbox" id="hideRe"> <span data-i18n="hideRedirects"></span></label>
   </div>
+  <p class="note" id="note" hidden></p>
   <ul id="results"></ul>
   <p class="error" id="error" hidden></p>
 
@@ -371,7 +455,7 @@ PAGE = """<!DOCTYPE html>
 
 <script>
 const $=id=>document.getElementById(id);
-const f=$("f"),btn=$("btn"),urlEl=$("url"),chips=$("chips"),
+const f=$("f"),btn=$("btn"),urlEl=$("url"),chips=$("chips"),note=$("note"),
   results=$("results"),errorEl=$("error"),reWrap=$("reWrap"),hideRe=$("hideRe");
 let data=null,scanning=false;
 
@@ -487,6 +571,20 @@ function summarize(){
     `<span class="chip r">${t("redirects")} <b>${c.redirect}</b></span>`+
     `<span class="chip p">${t("protected")} <b>${c.protected}</b></span>`;
   reWrap.hidden=c.redirect===0;
+  const msgs=[];
+  if(data.rebased){
+    const {from,to}=data.rebased;
+    msgs.push(lang==="pt"
+      ?`${from} redireciona para ${to}. Escaneando ${to}.`
+      :`${from} redirects to ${to}. Scanning ${to}.`);
+  }
+  if(data.partial){
+    msgs.push(lang==="pt"
+      ?`Parou no limite de tempo: ${data.scanned} de ${data.total} caminhos. Esse alvo responde devagar. Use uma profundidade menor, ou o CLI local para um scan completo.`
+      :`Stopped at the time limit: ${data.scanned} of ${data.total} paths. This target responds slowly. Pick a smaller depth, or use the local CLI for a full scan.`);
+  }
+  if(msgs.length){note.hidden=false;note.innerHTML=msgs.map(esc).join("<br>");}
+  else note.hidden=true;
 }
 
 function skeleton(){
@@ -502,7 +600,7 @@ hideRe.addEventListener("change",render);
 
 f.addEventListener("submit",async e=>{
   e.preventDefault();
-  data=null;errorEl.hidden=true;reWrap.hidden=true;
+  data=null;errorEl.hidden=true;reWrap.hidden=true;note.hidden=true;
   scanning=true;btn.disabled=true;btn.textContent=t("scanning");
   chips.innerHTML=`<span class="muted">${t("busy")}</span>`;
   skeleton();

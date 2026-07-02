@@ -16,6 +16,7 @@ from typing import Iterator
 from urllib.parse import urljoin
 
 import requests
+from requests.adapters import HTTPAdapter
 
 DEFAULT_WORDLIST = "wordlist.txt"
 DEFAULT_THREADS = 20
@@ -95,12 +96,17 @@ def load_wordlist(path: str) -> list[str]:
 def probe(session: requests.Session, base_url: str, word: str, timeout: float) -> Result:
     """Request a single path and classify the response."""
     url = urljoin(base_url + "/", word)
+    # stream=True fetches only headers; we never read the body, so targets with
+    # heavy 404 pages don't make a deep scan download hundreds of MB.
     try:
-        response = session.get(url, timeout=timeout, allow_redirects=False)
+        response = session.get(url, timeout=timeout, allow_redirects=False, stream=True)
     except requests.RequestException:
         return Result(url, 0, ok=False)
+    try:
+        status = response.status_code
+    finally:
+        response.close()
 
-    status = response.status_code
     # 2xx = found, 3xx = redirect, 401/403 = exists but protected: all interesting.
     interesting = (200 <= status < 400) or status in (401, 403)
     return Result(url, status, ok=interesting)
@@ -130,6 +136,12 @@ def scan(
     """
     session = requests.Session()
     session.headers.update({"User-Agent": USER_AGENT})
+    # Size the connection pool to the thread count so we reuse keep-alive
+    # connections instead of churning through a new TLS handshake per request
+    # (urllib3's default pool_maxsize is 10).
+    adapter = HTTPAdapter(pool_connections=threads, pool_maxsize=threads)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
 
     with ThreadPoolExecutor(max_workers=threads) as pool:
         futures = [pool.submit(probe, session, target_url, word, timeout) for word in words]
