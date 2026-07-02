@@ -30,6 +30,12 @@ app = Flask(__name__)
 MAX_WORDS = int(os.environ.get("MAX_WORDS", "12000"))
 MAX_THREADS = int(os.environ.get("MAX_THREADS", "100"))
 REQUEST_TIMEOUT = 4.0
+
+# Depth options the UI exposes. The wordlist is frequency-ordered, so each level
+# is a strict superset of the smaller ones (5000 = the 1000 essentials + 4000
+# more, 10000 = those + 5000 more). Any request depth is clamped to MAX_WORDS.
+DEPTHS = (1000, 5000, 10000)
+DEFAULT_DEPTH = 5000
 USER_AGENT = "PythonDirBuster/2.0 (+https://github.com/)"
 WORDLIST_PATH = os.path.join(os.path.dirname(__file__), "..", "wordlist.txt")
 
@@ -83,7 +89,13 @@ def scan_endpoint():
     if not host:
         return jsonify(error="Could not parse a hostname from the target URL."), 400
 
-    words = load_words()
+    try:
+        depth = int(request.args.get("depth", DEFAULT_DEPTH))
+    except ValueError:
+        depth = DEFAULT_DEPTH
+    if depth not in DEPTHS:
+        depth = DEFAULT_DEPTH
+    words = load_words()[:depth]
     threads = min(MAX_THREADS, max(1, len(words)))
     session = requests.Session()
     session.headers.update({"User-Agent": USER_AGENT})
@@ -208,6 +220,16 @@ PAGE = """<!DOCTYPE html>
   button:hover:not(:disabled){filter:brightness(1.06);transform:translateY(-1px)}
   button:active:not(:disabled){transform:translateY(1px)}
   button:disabled{opacity:.55;cursor:progress}
+  /* depth selector */
+  .opts{display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;margin:.85rem 0 0}
+  .opts .lbl{font-size:.78rem;color:var(--text-mute)}
+  .seg{display:inline-flex;background:var(--bg);border:1px solid var(--line);
+    border-radius:var(--r-pill);padding:2px}
+  .seg button{background:none;border:0;color:var(--text-mute);cursor:pointer;height:auto;
+    font-family:var(--mono);font-size:.78rem;font-weight:600;padding:.34rem .7rem;
+    border-radius:var(--r-pill);transition:.15s;letter-spacing:.02em}
+  .seg button:hover{color:var(--text-dim);transform:none;filter:none}
+  .seg button[aria-pressed="true"]{background:var(--accent-soft);color:var(--accent)}
 
   /* toolbar / summary */
   .bar{display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;
@@ -309,6 +331,14 @@ PAGE = """<!DOCTYPE html>
       </label>
       <button id="btn" type="submit" data-i18n="scan"></button>
     </form>
+    <div class="opts">
+      <span class="lbl" data-i18n="depthLabel"></span>
+      <div class="seg" id="depth" role="group" aria-label="Scan depth">
+        <button type="button" data-depth="1000">1000</button>
+        <button type="button" data-depth="5000">5000</button>
+        <button type="button" data-depth="10000">10000</button>
+      </div>
+    </div>
     <p class="hint" data-i18n-html="hint"></p>
   </div>
 
@@ -353,6 +383,7 @@ const T={
     h1:'Find the <span class="g">hidden paths</span> on any site.',
     lead:"A fast, multi-threaded scanner for web directories and files. Enter a target and probe it against thousands of common paths. Only scan what you're authorized to test.",
     scan:"Scan",scanning:"Scanning\\u2026",
+    depthLabel:"Paths to probe (deeper is slower):",
     hint:'Probes <code>TARGET/path</code> for each word in the list and reports what exists: <b style="color:var(--up)">2xx found</b>, <b style="color:var(--warn)">3xx redirect</b>, <b style="color:var(--down)">401/403 protected</b>. Redirects show where they point. A wall of <code>301</code>s usually means the server sends every unknown path to the same place (login, HTTPS, or a trailing slash).',
     ready:"Ready.",busy:"Scanning\\u2026 this can take a few seconds.",errored:"Error.",
     hideRedirects:"hide redirects",
@@ -368,6 +399,7 @@ const T={
     h1:'Encontre os <span class="g">caminhos escondidos</span> de qualquer site.',
     lead:"Um scanner rápido e multi-thread de diretórios e arquivos web. Digite um alvo e teste contra milhares de caminhos comuns. Escaneie apenas o que você tem autorização para testar.",
     scan:"Escanear",scanning:"Escaneando\\u2026",
+    depthLabel:"Caminhos a testar (mais fundo, mais lento):",
     hint:'Testa <code>ALVO/caminho</code> para cada palavra da lista e reporta o que existe: <b style="color:var(--up)">2xx encontrado</b>, <b style="color:var(--warn)">3xx redireciona</b>, <b style="color:var(--down)">401/403 protegido</b>. Os redirecionamentos mostram para onde apontam. Um monte de <code>301</code> geralmente significa que o servidor manda todo caminho desconhecido para o mesmo lugar (login, HTTPS ou barra no final).',
     ready:"Pronto.",busy:"Escaneando\\u2026 pode levar alguns segundos.",errored:"Erro.",
     hideRedirects:"ocultar redirecionamentos",
@@ -410,6 +442,19 @@ function setLang(l){
 }
 for(const b of document.querySelectorAll(".lang button"))
   b.addEventListener("click",()=>setLang(b.dataset.lang));
+
+/* ---- scan depth ---- */
+const DEPTHS=[1000,5000,10000];
+let depth=parseInt(localStorage.getItem("depth"),10);
+if(!DEPTHS.includes(depth))depth=5000;
+const depthBtns=document.querySelectorAll("#depth button");
+function applyDepth(){
+  for(const b of depthBtns)b.setAttribute("aria-pressed",String(parseInt(b.dataset.depth,10)===depth));
+}
+for(const b of depthBtns)b.addEventListener("click",()=>{
+  depth=parseInt(b.dataset.depth,10);localStorage.setItem("depth",depth);applyDepth();
+});
+applyDepth();
 
 /* ---- rendering ---- */
 function render(){
@@ -462,7 +507,7 @@ f.addEventListener("submit",async e=>{
   chips.innerHTML=`<span class="muted">${t("busy")}</span>`;
   skeleton();
   try{
-    const r=await fetch("/api/scan?url="+encodeURIComponent(urlEl.value));
+    const r=await fetch("/api/scan?url="+encodeURIComponent(urlEl.value)+"&depth="+depth);
     const d=await r.json();
     if(!r.ok)throw new Error(d.error||"Request failed.");
     data=d;summarize();render();
