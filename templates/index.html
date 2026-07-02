@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PythonDirBuster</title>
+  <style>
+    :root {
+      --bg: #0f1117; --panel: #1a1d27; --border: #2a2e3a; --text: #e6e6e6;
+      --muted: #8a90a2; --accent: #a06bff;
+      --found: #38d66b; --redirect: #f2c94c; --protected: #ff6b6b;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg); color: var(--text);
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      padding: 2rem 1rem;
+    }
+    .wrap { max-width: 820px; margin: 0 auto; }
+    h1 { font-size: 1.4rem; margin: 0 0 .25rem; }
+    h1 .sword { color: var(--accent); }
+    .sub { color: var(--muted); margin: 0 0 1.5rem; font-size: .85rem; }
+    form {
+      display: grid; grid-template-columns: 1fr auto; gap: .75rem;
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 10px; padding: 1rem;
+    }
+    .row { display: flex; gap: .75rem; grid-column: 1 / -1; flex-wrap: wrap; }
+    input {
+      background: #0d0f16; border: 1px solid var(--border); color: var(--text);
+      border-radius: 7px; padding: .6rem .8rem; font: inherit; width: 100%;
+    }
+    input:focus { outline: none; border-color: var(--accent); }
+    .field { display: flex; flex-direction: column; gap: .3rem; }
+    .field label { font-size: .7rem; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+    .field.url { grid-column: 1 / 2; }
+    .small { max-width: 110px; }
+    button {
+      background: var(--accent); color: #fff; border: 0; border-radius: 7px;
+      padding: 0 1.4rem; font: inherit; font-weight: 600; cursor: pointer;
+      align-self: end; height: 42px;
+    }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    .status-bar {
+      margin: 1.25rem 0 .5rem; display: flex; justify-content: space-between;
+      color: var(--muted); font-size: .82rem; min-height: 1.2em;
+    }
+    .progress { height: 6px; background: var(--border); border-radius: 4px; overflow: hidden; }
+    .progress > div { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+    ul { list-style: none; padding: 0; margin: 1rem 0 0; }
+    li {
+      display: flex; align-items: center; gap: .75rem; padding: .55rem .75rem;
+      border: 1px solid var(--border); border-radius: 7px; margin-bottom: .5rem;
+      background: var(--panel); word-break: break-all;
+    }
+    .badge {
+      font-weight: 700; font-size: .78rem; padding: .15rem .5rem; border-radius: 5px;
+      flex-shrink: 0; min-width: 42px; text-align: center;
+    }
+    .found .badge { background: rgba(56,214,107,.15); color: var(--found); }
+    .redirect .badge { background: rgba(242,201,76,.15); color: var(--redirect); }
+    .protected .badge { background: rgba(255,107,107,.15); color: var(--protected); }
+    a { color: inherit; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .empty { color: var(--muted); font-size: .85rem; }
+    .error { color: var(--protected); font-size: .85rem; margin-top: 1rem; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1><span class="sword">⚔️</span> PythonDirBuster</h1>
+    <p class="sub">Multi-threaded web directory brute-forcer &mdash; scan only what you're authorized to.</p>
+
+    <form id="scan-form">
+      <div class="row">
+        <div class="field url" style="flex:1 1 300px;">
+          <label for="url">Target URL</label>
+          <input id="url" name="url" placeholder="example.com" autocomplete="off" required>
+        </div>
+        <div class="field">
+          <label for="threads">Threads</label>
+          <input id="threads" class="small" name="threads" type="number" min="1" max="200" value="{{ defaults.threads }}">
+        </div>
+        <div class="field">
+          <label for="timeout">Timeout (s)</label>
+          <input id="timeout" class="small" name="timeout" type="number" min="1" step="0.5" value="{{ defaults.timeout }}">
+        </div>
+        <button id="submit" type="submit">Scan</button>
+      </div>
+    </form>
+
+    <div class="status-bar">
+      <span id="status">Ready.</span>
+      <span id="counts"></span>
+    </div>
+    <div class="progress"><div id="bar"></div></div>
+
+    <ul id="results"></ul>
+    <p id="empty" class="empty" hidden>No interesting paths found.</p>
+    <p id="error" class="error" hidden></p>
+  </div>
+
+  <script>
+    const form = document.getElementById("scan-form");
+    const submit = document.getElementById("submit");
+    const statusEl = document.getElementById("status");
+    const countsEl = document.getElementById("counts");
+    const bar = document.getElementById("bar");
+    const results = document.getElementById("results");
+    const emptyEl = document.getElementById("empty");
+    const errorEl = document.getElementById("error");
+    let source = null;
+
+    function reset() {
+      results.innerHTML = "";
+      bar.style.width = "0%";
+      countsEl.textContent = "";
+      emptyEl.hidden = true;
+      errorEl.hidden = true;
+    }
+
+    function finish(msg) {
+      submit.disabled = false;
+      submit.textContent = "Scan";
+      statusEl.textContent = msg;
+      if (source) { source.close(); source = null; }
+    }
+
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      if (source) source.close();
+      reset();
+      submit.disabled = true;
+      submit.textContent = "Scanning…";
+      statusEl.textContent = "Starting…";
+
+      const params = new URLSearchParams({
+        url: document.getElementById("url").value,
+        threads: document.getElementById("threads").value,
+        timeout: document.getElementById("timeout").value,
+      });
+      source = new EventSource("/scan?" + params.toString());
+
+      source.addEventListener("start", (ev) => {
+        const d = JSON.parse(ev.data);
+        statusEl.textContent = `Scanning ${d.target} — ${d.total} paths, ${d.threads} threads`;
+      });
+
+      source.addEventListener("result", (ev) => {
+        const d = JSON.parse(ev.data);
+        const li = document.createElement("li");
+        li.className = d.category;
+        li.innerHTML = `<span class="badge">${d.status}</span>` +
+          `<a href="${d.url}" target="_blank" rel="noopener">${d.url}</a>`;
+        results.appendChild(li);
+      });
+
+      source.addEventListener("progress", (ev) => {
+        const d = JSON.parse(ev.data);
+        bar.style.width = (100 * d.done / d.total).toFixed(1) + "%";
+        countsEl.textContent = `${d.done}/${d.total} · ${d.found} found`;
+      });
+
+      source.addEventListener("done", (ev) => {
+        const d = JSON.parse(ev.data);
+        bar.style.width = "100%";
+        countsEl.textContent = `${d.done}/${d.total} · ${d.found} found`;
+        if (d.found === 0) emptyEl.hidden = false;
+        finish(`Done — ${d.found} interesting path(s) found.`);
+      });
+
+      source.addEventListener("error", (ev) => {
+        if (ev.data) {
+          const d = JSON.parse(ev.data);
+          errorEl.textContent = d.message;
+          errorEl.hidden = false;
+          finish("Error.");
+        } else if (source && source.readyState === EventSource.CLOSED) {
+          finish("Connection closed.");
+        }
+      });
+    });
+  </script>
+</body>
+</html>

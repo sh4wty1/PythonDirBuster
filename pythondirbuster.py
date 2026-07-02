@@ -1,69 +1,203 @@
-import requests
-from colored import fg
+#!/usr/bin/env python3
+"""PythonDirBuster - a small, multi-threaded web directory/file brute-forcer.
 
-# Colors
-purple = fg("purple_3")
-green = fg("green")
-red = fg("red")
-
-
-def show_banner():
-    print(
-        "\n"
-        + purple
-        + r"""  
-  _____       _   _                   _____  _      _               _   
- |  __ \     | | | |                 |  __ \(_)    | |             | |  
- | |__) |   _| |_| |__   ___  _ __   | |  | |_ _ __| |__  _   _ ___| |_ 
- |  ___/ | | | __| '_ \ / _ \| '_ \  | |  | | | '__| '_ \| | | / __| __|
- | |   | |_| | |_| | | | (_) | | | | | |__| | | |  | |_) | |_| \__ \ |_ 
- |_|    \__, |\__|_| |_|\___/|_| |_| |_____/|_|_|  |_.__/ \__,_|___/\__|
-         __/ |                                                          
-        |___/                                                           
+Given a target URL and a wordlist, it requests every ``TARGET/word`` path and
+reports the ones that look interesting (found, redirected, or protected).
 """
-    )
-    print(purple + "Coded by @nglshawty1 :)\n")
-    print(
-        purple
-        + "This process might take a while depending on the size of the wordlist...\n"
-    )
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from typing import Iterator
+from urllib.parse import urljoin
+
+import requests
+
+DEFAULT_WORDLIST = "wordlist.txt"
+DEFAULT_THREADS = 20
+DEFAULT_TIMEOUT = 5.0
+USER_AGENT = "PythonDirBuster/2.0 (+https://github.com/)"
 
 
-def format_url(url):
-    if not url.startswith("http://") and not url.startswith("https://"):
-        return "https://" + url
-    return url
+# --- Terminal colors ---------------------------------------------------------
+# Self-contained ANSI colors so we don't depend on a third-party color library.
+class Color:
+    RESET = "\033[0m"
+    RED = "\033[31m"
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    PURPLE = "\033[35m"
+    GREY = "\033[90m"
+
+    _enabled: bool = True
+
+    @classmethod
+    def paint(cls, text: str, color: str) -> str:
+        if not cls._enabled:
+            return text
+        return f"{color}{text}{cls.RESET}"
+
+    @classmethod
+    def setup(cls, use_color: bool) -> None:
+        # Honor --no-color, non-tty output, and the NO_COLOR convention.
+        cls._enabled = use_color and sys.stdout.isatty() and "NO_COLOR" not in os.environ
+        if cls._enabled and os.name == "nt":
+            # Enable ANSI escape processing on legacy Windows terminals.
+            os.system("")
 
 
-def run_dirbuster(target_url, wordlist_path="Subdomain.txt"):
+BANNER = r"""
+  _____       _   _                   _____  _      _               _
+ |  __ \     | | | |                 |  __ \(_)    | |             | |
+ | |__) |   _| |_| |__   ___  _ __   | |  | |_ _ __| |__  _   _ ___| |_
+ |  ___/ | | | __| '_ \ / _ \| '_ \  | |  | | | '__| '_ \| | | / __| __|
+ | |   | |_| | |_| | | | (_) | | | | | |__| | | |  | |_) | |_| \__ \ |_
+ |_|    \__, |\__|_| |_|\___/|_| |_| |_____/|_|_|  |_.__/ \__,_|___/\__|
+         __/ |
+        |___/
+"""
+
+
+@dataclass
+class Result:
+    url: str
+    status: int
+    ok: bool  # worth showing to the user
+
+
+def show_banner() -> None:
+    print(Color.paint(BANNER, Color.PURPLE))
+    print(Color.paint("Coded by @nglshawty1 :)", Color.PURPLE))
+
+
+def normalize_url(url: str) -> str:
+    """Add a scheme if missing and strip trailing slashes for clean joins."""
+    url = url.strip()
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    return url.rstrip("/")
+
+
+def load_wordlist(path: str) -> list[str]:
+    with open(path, "r", encoding="utf-8", errors="ignore") as file:
+        words = []
+        for line in file:
+            word = line.strip().lstrip("/")
+            if word and not word.startswith("#"):
+                words.append(word)
+    return words
+
+
+def probe(session: requests.Session, base_url: str, word: str, timeout: float) -> Result:
+    """Request a single path and classify the response."""
+    url = urljoin(base_url + "/", word)
     try:
-        with open(wordlist_path, "r") as file:
-            lines = file.read().splitlines()
-    except FileNotFoundError:
-        print(red + f"Wordlist '{wordlist_path}' not found.")
-        return
+        response = session.get(url, timeout=timeout, allow_redirects=False)
+    except requests.RequestException:
+        return Result(url, 0, ok=False)
 
-    for word in lines:
-        url = f"{target_url}/{word}"
-        try:
-            response = requests.get(url)
-            if 200 <= response.status_code <= 299:
-                print(green + "########################")
-                print(green + f"{url} // status code: {response.status_code}")
-                print(green + "########################")
-            else:
-                print(red + f"Offline: {url} (status {response.status_code})")
-        except requests.RequestException:
-            print(red + f"Error connecting to: {url}")
+    status = response.status_code
+    # 2xx = found, 3xx = redirect, 401/403 = exists but protected: all interesting.
+    interesting = (200 <= status < 400) or status in (401, 403)
+    return Result(url, status, ok=interesting)
 
 
-def main():
+def report(result: Result) -> None:
+    if result.status == 0:
+        return  # connection error, stay quiet
+    if 200 <= result.status < 300:
+        color = Color.GREEN
+    elif 300 <= result.status < 400:
+        color = Color.YELLOW
+    else:  # 401 / 403
+        color = Color.RED
+    print(Color.paint(f"[{result.status}] {result.url}", color))
+
+
+def scan(
+    target_url: str,
+    words: list[str],
+    threads: int = DEFAULT_THREADS,
+    timeout: float = DEFAULT_TIMEOUT,
+) -> Iterator[Result]:
+    """Probe every path concurrently, yielding each ``Result`` as it completes.
+
+    This is the shared engine used by both the CLI and the web app.
+    """
+    session = requests.Session()
+    session.headers.update({"User-Agent": USER_AGENT})
+
+    with ThreadPoolExecutor(max_workers=threads) as pool:
+        futures = [pool.submit(probe, session, target_url, word, timeout) for word in words]
+        for future in as_completed(futures):
+            yield future.result()
+
+
+def run_dirbuster(target_url: str, words: list[str], threads: int, timeout: float) -> list[Result]:
+    total = len(words)
+    print(Color.paint(f"\nScanning {target_url} with {total} paths using {threads} threads...\n", Color.PURPLE))
+
+    found: list[Result] = []
+    done = 0
+    try:
+        for result in scan(target_url, words, threads, timeout):
+            done += 1
+            if result.ok:
+                report(result)
+                found.append(result)
+            # Lightweight progress indicator on the same line.
+            print(Color.paint(f"  progress: {done}/{total}", Color.GREY), end="\r", flush=True)
+    except KeyboardInterrupt:
+        print(Color.paint("\n\nInterrupted by user.", Color.YELLOW))
+
+    print(" " * 40, end="\r")  # clear the progress line
+    return found
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="A small multi-threaded web directory/file brute-forcer.",
+    )
+    parser.add_argument("url", nargs="?", help="target URL (prompted if omitted)")
+    parser.add_argument("-w", "--wordlist", default=DEFAULT_WORDLIST, help=f"wordlist path (default: {DEFAULT_WORDLIST})")
+    parser.add_argument("-t", "--threads", type=int, default=DEFAULT_THREADS, help=f"concurrent requests (default: {DEFAULT_THREADS})")
+    parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT, help=f"request timeout in seconds (default: {DEFAULT_TIMEOUT})")
+    parser.add_argument("--no-color", action="store_true", help="disable colored output")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    Color.setup(use_color=not args.no_color)
+
     show_banner()
-    target = input("Enter the target URL -> ").strip()
-    target = format_url(target)
-    run_dirbuster(target)
+
+    target = args.url or input(Color.paint("Enter the target URL -> ", Color.PURPLE))
+    target = normalize_url(target)
+    if not target:
+        print(Color.paint("No target URL provided.", Color.RED))
+        return 1
+
+    try:
+        words = load_wordlist(args.wordlist)
+    except FileNotFoundError:
+        print(Color.paint(f"Wordlist '{args.wordlist}' not found.", Color.RED))
+        return 1
+
+    if not words:
+        print(Color.paint(f"Wordlist '{args.wordlist}' is empty.", Color.RED))
+        return 1
+
+    found = run_dirbuster(target, words, args.threads, args.timeout)
+
+    summary = f"\nDone. {len(found)} interesting path(s) found."
+    print(Color.paint(summary, Color.GREEN if found else Color.YELLOW))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
-    
+    sys.exit(main())

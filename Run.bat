@@ -1,2 +1,3 @@
-python pythondirbuster.py
+@echo off
+python pythondirbuster.py %*
 pause
