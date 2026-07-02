@@ -79,8 +79,8 @@ of the (frequency-ordered) wordlist to stay inside the function timeout.
 
    | Name | Default | Description |
    | --- | --- | --- |
-   | `MAX_WORDS` | `1000` | How many paths to probe per scan |
-   | `MAX_THREADS` | `50` | Max concurrent requests |
+   | `MAX_WORDS` | `12000` | How many paths to probe per scan |
+   | `MAX_THREADS` | `100` | Max concurrent requests |
 
 > ⚠️ **This deployment scans any domain.** Anyone who can reach it can use your
 > Vercel IPs to probe third-party sites. Keep it private, put it behind auth, or

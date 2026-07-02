@@ -7,7 +7,7 @@ serverless). Scanning is open to any domain.
 
   ⚠️ This deployment can probe any URL from Vercel's IPs. Anyone who can reach
   it can use it to scan third-party sites (abuse / SSRF surface). Only expose it
-  if you're comfortable with that — e.g. put it behind auth, or set ALLOWED_DOMAINS
+  if you're comfortable with that (e.g. put it behind auth), or set ALLOWED_DOMAINS
   again to re-enable the allow-list (see the git history for that variant).
 
 Tune the caps without a redeploy via the MAX_WORDS / MAX_THREADS env vars.
@@ -25,8 +25,10 @@ from flask import Flask, jsonify, request
 app = Flask(__name__)
 
 # Caps keep each scan inside the function timeout; override via env on Vercel.
-MAX_WORDS = int(os.environ.get("MAX_WORDS", "1000"))
-MAX_THREADS = int(os.environ.get("MAX_THREADS", "50"))
+# 12k covers admin-panel paths like /boss, /controlpanel, /adminpanel that sit
+# deep in the frequency-ordered list. High thread count keeps it inside 60s.
+MAX_WORDS = int(os.environ.get("MAX_WORDS", "12000"))
+MAX_THREADS = int(os.environ.get("MAX_THREADS", "100"))
 REQUEST_TIMEOUT = 4.0
 USER_AGENT = "PythonDirBuster/2.0 (+https://github.com/)"
 WORDLIST_PATH = os.path.join(os.path.dirname(__file__), "..", "wordlist.txt")
@@ -99,7 +101,11 @@ def scan_endpoint():
 
 
 @app.route("/")
+@app.route("/pt")
+@app.route("/en")
 def index():
+    # One page; the client picks its language from the path (/pt, /en),
+    # localStorage, or the browser locale. See the i18n block in PAGE.
     return PAGE
 
 
@@ -127,8 +133,8 @@ PAGE = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PythonDirBuster — web path scanner</title>
-<meta name="description" content="A fast, multi-threaded web directory & file scanner. By Lucas Fassi.">
+<title>DirBuster by Fassi | web path scanner</title>
+<meta name="description" content="A fast, multi-threaded scanner for web directories and files. By Lucas Fassi.">
 <meta name="theme-color" content="#141310">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -163,18 +169,27 @@ PAGE = """<!DOCTYPE html>
   .brand{display:flex;align-items:center;gap:.6rem;font-weight:600;letter-spacing:-.01em}
   .brand svg{width:30px;height:30px;border-radius:8px;flex-shrink:0}
   .brand b{font-weight:600}.brand .dim{color:var(--text-mute);font-weight:500}
-  nav{display:flex;gap:.4rem;flex-wrap:wrap}
+  .navtools{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap}
+  nav{display:flex;gap:.4rem}
   .ghost{font-family:var(--mono);font-size:.8rem;color:var(--text-dim);text-decoration:none;
     padding:.4rem .7rem;border:1px solid var(--line-soft);border-radius:var(--r-pill);
     transition:.15s;white-space:nowrap}
   .ghost:hover{color:var(--text);border-color:var(--line-strong);background:var(--surface)}
   .ghost .ar{color:var(--accent-deep);margin-left:.15em}
+  /* language switch */
+  .lang{display:inline-flex;background:var(--surface);border:1px solid var(--line);
+    border-radius:var(--r-pill);padding:2px;font-family:var(--mono);font-size:.74rem}
+  .lang button{background:none;border:0;color:var(--text-mute);cursor:pointer;
+    padding:.3rem .55rem;border-radius:var(--r-pill);height:auto;font-weight:600;
+    letter-spacing:.03em;transition:.15s}
+  .lang button:hover{color:var(--text-dim)}
+  .lang button[aria-pressed="true"]{background:var(--accent-soft);color:var(--accent)}
 
   /* hero */
   .hero{margin:0 0 1.75rem}
   h1{font-size:clamp(1.7rem,4vw,2.4rem);line-height:1.1;letter-spacing:-.02em;margin:0 0 .6rem}
   h1 .g{color:var(--accent)}
-  .lead{color:var(--text-dim);margin:0;max-width:56ch;font-size:1rem}
+  .lead{color:var(--text-dim);margin:0;max-width:58ch;font-size:1rem}
 
   /* scan card */
   .card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);
@@ -189,8 +204,9 @@ PAGE = """<!DOCTYPE html>
   input:focus{outline:none}input::placeholder{color:var(--text-mute)}
   button{background:var(--accent);color:oklch(22% .03 145);border:0;border-radius:var(--r);
     padding:0 1.5rem;font-family:var(--sans);font-size:.95rem;font-weight:600;cursor:pointer;
-    height:44px;transition:.15s;letter-spacing:-.01em}
+    height:44px;transition:.12s;letter-spacing:-.01em}
   button:hover:not(:disabled){filter:brightness(1.06);transform:translateY(-1px)}
+  button:active:not(:disabled){transform:translateY(1px)}
   button:disabled{opacity:.55;cursor:progress}
 
   /* toolbar / summary */
@@ -213,7 +229,9 @@ PAGE = """<!DOCTYPE html>
   /* results */
   ul{list-style:none;padding:0;margin:.5rem 0 0;display:flex;flex-direction:column;gap:.4rem}
   .row{display:flex;align-items:center;gap:.75rem;padding:.6rem .8rem;border:1px solid var(--line);
-    border-radius:var(--r);background:var(--surface);transition:.15s;flex-wrap:wrap}
+    border-radius:var(--r);background:var(--surface);transition:.15s;flex-wrap:wrap;
+    animation:rise .25s ease both}
+  @keyframes rise{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
   .row:hover{border-color:var(--line-strong);background:var(--surface-2)}
   .badge{font-family:var(--mono);font-weight:600;font-size:.78rem;padding:.2rem .5rem;
     border-radius:6px;flex-shrink:0;min-width:44px;text-align:center;letter-spacing:.02em}
@@ -225,6 +243,11 @@ PAGE = """<!DOCTYPE html>
   .u:hover{color:var(--accent)}
   .loc{font-family:var(--mono);font-size:.78rem;color:var(--text-mute);word-break:break-all}
   .empty{color:var(--text-mute);font-family:var(--mono);font-size:.85rem;padding:.5rem 0}
+  /* skeleton loader (matches result-row shape) */
+  .sk{height:41px;border:1px solid var(--line);border-radius:var(--r);
+    background:linear-gradient(100deg,var(--surface) 30%,var(--surface-2) 50%,var(--surface) 70%);
+    background-size:220% 100%;animation:shim 1.15s linear infinite}
+  @keyframes shim{from{background-position:180% 0}to{background-position:-40% 0}}
   .error{color:var(--down);font-family:var(--mono);font-size:.85rem;margin-top:1rem;
     background:var(--down-soft);border:1px solid oklch(66% .17 24/.3);border-radius:var(--r);padding:.7rem .8rem}
   .hint{color:var(--text-mute);font-size:.78rem;margin:.75rem 0 0;line-height:1.55}
@@ -248,6 +271,10 @@ PAGE = """<!DOCTYPE html>
   footer{margin-top:2.5rem;color:var(--text-mute);font-size:.8rem;
     display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap}
   footer a{color:var(--text-dim);text-decoration:none}footer a:hover{color:var(--accent)}
+
+  @media(prefers-reduced-motion:reduce){
+    *{animation:none!important;transition:none!important}
+  }
 </style>
 </head>
 <body>
@@ -257,15 +284,21 @@ PAGE = """<!DOCTYPE html>
       <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="#141310"/><path d="M8 10.5 13 16l-5 5.5" fill="none" stroke="#b6f09c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/><rect x="15.5" y="20" width="8.5" height="2.4" rx="1.2" fill="#b6f09c"/></svg>
       <b>DirBuster</b><span class="dim">by Fassi</span>
     </span>
-    <nav>
-      <a class="ghost" href="https://fassi.dev" target="_blank" rel="noopener">fassi.dev<span class="ar">&#8599;</span></a>
-      <a class="ghost" href="https://invest.fassi.dev" target="_blank" rel="noopener">invest<span class="ar">&#8599;</span></a>
-    </nav>
+    <div class="navtools">
+      <nav>
+        <a class="ghost" href="https://fassi.dev" target="_blank" rel="noopener">fassi.dev<span class="ar">&#8599;</span></a>
+        <a class="ghost" href="https://invest.fassi.dev" target="_blank" rel="noopener">invest<span class="ar">&#8599;</span></a>
+      </nav>
+      <div class="lang" role="group" aria-label="Language">
+        <button type="button" data-lang="en">EN</button>
+        <button type="button" data-lang="pt">PT</button>
+      </div>
+    </div>
   </header>
 
   <section class="hero">
-    <h1>Find the <span class="g">hidden paths</span> on any site.</h1>
-    <p class="lead">A fast, multi-threaded web directory &amp; file scanner. Enter a target and probe it against thousands of common paths &mdash; only scan what you're authorized to test.</p>
+    <h1 data-i18n-html="h1"></h1>
+    <p class="lead" data-i18n="lead"></p>
   </section>
 
   <div class="card">
@@ -274,53 +307,115 @@ PAGE = """<!DOCTYPE html>
         <span class="pre">https://</span>
         <input id="url" placeholder="example.com" autocomplete="off" autocapitalize="off" spellcheck="false" required>
       </label>
-      <button id="btn" type="submit">Scan</button>
+      <button id="btn" type="submit" data-i18n="scan"></button>
     </form>
-    <p class="hint">Probes <code>TARGET/path</code> for each word in the list and reports what exists:
-      <b style="color:var(--up)">2xx found</b>, <b style="color:var(--warn)">3xx redirect</b>, <b style="color:var(--down)">401/403 protected</b>.
-      Redirects show where they point &mdash; a wall of <code>301</code>s usually means the server sends every unknown path to one place (login, HTTPS, or a trailing slash).</p>
+    <p class="hint" data-i18n-html="hint"></p>
   </div>
 
   <div class="bar">
-    <div class="chips" id="chips"><span class="muted" id="status">Ready.</span></div>
-    <label class="toggle" id="reWrap" hidden><input type="checkbox" id="hideRe"> hide redirects</label>
+    <div class="chips" id="chips"><span class="muted" id="status" data-i18n="ready"></span></div>
+    <label class="toggle" id="reWrap" hidden><input type="checkbox" id="hideRe"> <span data-i18n="hideRedirects"></span></label>
   </div>
   <ul id="results"></ul>
   <p class="error" id="error" hidden></p>
 
   <section class="more">
-    <h2>More from Lucas Fassi</h2>
+    <h2 data-i18n="moreTitle"></h2>
     <div class="grid">
       <a class="prod" href="https://fassi.dev" target="_blank" rel="noopener">
         <div class="top"><span class="name">fassi.dev</span><span class="ar">&#8599;</span></div>
-        <p class="desc">Portfolio &amp; software &mdash; who I am and what I build.</p>
+        <p class="desc" data-i18n="prodPortfolio"></p>
       </a>
       <a class="prod" href="https://invest.fassi.dev" target="_blank" rel="noopener">
         <div class="top"><span class="name">invest.fassi.dev</span><span class="ar">&#8599;</span></div>
-        <p class="desc">Investment analysis &amp; market dashboards.</p>
+        <p class="desc" data-i18n="prodInvest"></p>
       </a>
     </div>
   </section>
 
   <footer>
-    <span>Built by <a href="https://fassi.dev" target="_blank" rel="noopener">Lucas Fassi</a></span>
-    <a href="https://github.com/sh4wty1/PythonDirBuster" target="_blank" rel="noopener">Source on GitHub &#8599;</a>
+    <span data-i18n-html="builtBy"></span>
+    <a href="https://github.com/sh4wty1/PythonDirBuster" target="_blank" rel="noopener"><span data-i18n="source"></span> &#8599;</a>
   </footer>
 </div>
 
 <script>
 const $=id=>document.getElementById(id);
-const f=$("f"),btn=$("btn"),urlEl=$("url"),statusEl=$("status"),chips=$("chips"),
+const f=$("f"),btn=$("btn"),urlEl=$("url"),chips=$("chips"),
   results=$("results"),errorEl=$("error"),reWrap=$("reWrap"),hideRe=$("hideRe");
-let data=null;
+let data=null,scanning=false;
 
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 
+/* ---- i18n ---- */
+const T={
+  en:{
+    h1:'Find the <span class="g">hidden paths</span> on any site.',
+    lead:"A fast, multi-threaded scanner for web directories and files. Enter a target and probe it against thousands of common paths. Only scan what you're authorized to test.",
+    scan:"Scan",scanning:"Scanning\\u2026",
+    hint:'Probes <code>TARGET/path</code> for each word in the list and reports what exists: <b style="color:var(--up)">2xx found</b>, <b style="color:var(--warn)">3xx redirect</b>, <b style="color:var(--down)">401/403 protected</b>. Redirects show where they point. A wall of <code>301</code>s usually means the server sends every unknown path to the same place (login, HTTPS, or a trailing slash).',
+    ready:"Ready.",busy:"Scanning\\u2026 this can take a few seconds.",errored:"Error.",
+    hideRedirects:"hide redirects",
+    scanned:"scanned",found:"found",redirects:"redirects",protected:"protected",
+    none:"No interesting paths found.",filtered:"All results hidden by the filter.",
+    moreTitle:"More from Lucas Fassi",
+    prodPortfolio:"Portfolio and software. Who I am and what I build.",
+    prodInvest:"Investment analysis and market dashboards.",
+    builtBy:'Built by <a href="https://fassi.dev" target="_blank" rel="noopener">Lucas Fassi</a>',
+    source:"Source on GitHub"
+  },
+  pt:{
+    h1:'Encontre os <span class="g">caminhos escondidos</span> de qualquer site.',
+    lead:"Um scanner rápido e multi-thread de diretórios e arquivos web. Digite um alvo e teste contra milhares de caminhos comuns. Escaneie apenas o que você tem autorização para testar.",
+    scan:"Escanear",scanning:"Escaneando\\u2026",
+    hint:'Testa <code>ALVO/caminho</code> para cada palavra da lista e reporta o que existe: <b style="color:var(--up)">2xx encontrado</b>, <b style="color:var(--warn)">3xx redireciona</b>, <b style="color:var(--down)">401/403 protegido</b>. Os redirecionamentos mostram para onde apontam. Um monte de <code>301</code> geralmente significa que o servidor manda todo caminho desconhecido para o mesmo lugar (login, HTTPS ou barra no final).',
+    ready:"Pronto.",busy:"Escaneando\\u2026 pode levar alguns segundos.",errored:"Erro.",
+    hideRedirects:"ocultar redirecionamentos",
+    scanned:"escaneados",found:"encontrados",redirects:"redirecionam.",protected:"protegidos",
+    none:"Nenhum caminho interessante encontrado.",filtered:"Todos os resultados ocultados pelo filtro.",
+    moreTitle:"Mais do Lucas Fassi",
+    prodPortfolio:"Portfólio e software. Quem eu sou e o que eu construo.",
+    prodInvest:"Análises de investimento e painéis de mercado.",
+    builtBy:'Feito por <a href="https://fassi.dev" target="_blank" rel="noopener">Lucas Fassi</a>',
+    source:"Código no GitHub"
+  }
+};
+
+function pickLang(){
+  const p=location.pathname.replace(/\\/+$/,"");
+  if(p==="/pt")return "pt";
+  if(p==="/en")return "en";
+  const saved=localStorage.getItem("lang");
+  if(saved==="pt"||saved==="en")return saved;
+  return (navigator.language||"").toLowerCase().startsWith("pt")?"pt":"en";
+}
+let lang=pickLang();
+
+function t(k){return (T[lang]&&T[lang][k])||T.en[k]||k;}
+
+function applyLang(){
+  document.documentElement.lang=lang;
+  for(const el of document.querySelectorAll("[data-i18n]"))el.textContent=t(el.dataset.i18n);
+  for(const el of document.querySelectorAll("[data-i18n-html]"))el.innerHTML=t(el.dataset.i18nHtml);
+  for(const b of document.querySelectorAll(".lang button"))
+    b.setAttribute("aria-pressed",String(b.dataset.lang===lang));
+  if(!scanning)btn.textContent=t("scan");
+  if(data){summarize();render();}
+}
+
+function setLang(l){
+  lang=l;localStorage.setItem("lang",l);
+  history.replaceState(null,"",l==="pt"?"/pt":"/");
+  applyLang();
+}
+for(const b of document.querySelectorAll(".lang button"))
+  b.addEventListener("click",()=>setLang(b.dataset.lang));
+
+/* ---- rendering ---- */
 function render(){
   results.innerHTML="";
-  if(!data){return;}
-  const hide=hideRe.checked;
-  let shown=0;
+  if(!data)return;
+  const hide=hideRe.checked;let shown=0;
   for(const it of data.results){
     if(hide&&it.category==="redirect")continue;
     shown++;
@@ -333,7 +428,7 @@ function render(){
   }
   if(shown===0){
     const li=document.createElement("li");li.className="empty";
-    li.textContent=data.results.length?"All results hidden by the filter.":"No interesting paths found.";
+    li.textContent=data.results.length?t("filtered"):t("none");
     results.appendChild(li);
   }
 }
@@ -342,32 +437,45 @@ function summarize(){
   const c={found:0,redirect:0,protected:0};
   for(const it of data.results)c[it.category]=(c[it.category]||0)+1;
   chips.innerHTML=
-    `<span class="chip">scanned <b>${data.scanned}</b></span>`+
-    `<span class="chip f">found <b>${c.found}</b></span>`+
-    `<span class="chip r">redirects <b>${c.redirect}</b></span>`+
-    `<span class="chip p">protected <b>${c.protected}</b></span>`;
+    `<span class="chip">${t("scanned")} <b>${data.scanned}</b></span>`+
+    `<span class="chip f">${t("found")} <b>${c.found}</b></span>`+
+    `<span class="chip r">${t("redirects")} <b>${c.redirect}</b></span>`+
+    `<span class="chip p">${t("protected")} <b>${c.protected}</b></span>`;
   reWrap.hidden=c.redirect===0;
+}
+
+function skeleton(){
+  results.innerHTML="";
+  for(let i=0;i<6;i++){
+    const li=document.createElement("li");li.className="sk";
+    li.style.width=(72+((i*13)%26))+"%";
+    results.appendChild(li);
+  }
 }
 
 hideRe.addEventListener("change",render);
 
 f.addEventListener("submit",async e=>{
   e.preventDefault();
-  data=null;results.innerHTML="";errorEl.hidden=true;reWrap.hidden=true;
-  btn.disabled=true;btn.textContent="Scanning\\u2026";
-  chips.innerHTML='<span class="muted">Scanning\\u2026 this can take a few seconds.</span>';
+  data=null;errorEl.hidden=true;reWrap.hidden=true;
+  scanning=true;btn.disabled=true;btn.textContent=t("scanning");
+  chips.innerHTML=`<span class="muted">${t("busy")}</span>`;
+  skeleton();
   try{
     const r=await fetch("/api/scan?url="+encodeURIComponent(urlEl.value));
     const d=await r.json();
     if(!r.ok)throw new Error(d.error||"Request failed.");
     data=d;summarize();render();
   }catch(err){
-    chips.innerHTML='<span class="muted">Error.</span>';
+    results.innerHTML="";
+    chips.innerHTML=`<span class="muted">${t("errored")}</span>`;
     errorEl.textContent=err.message;errorEl.hidden=false;
   }finally{
-    btn.disabled=false;btn.textContent="Scan";
+    scanning=false;btn.disabled=false;btn.textContent=t("scan");
   }
 });
+
+applyLang();
 </script>
 </body>
 </html>"""
